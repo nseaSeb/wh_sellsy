@@ -1,0 +1,55 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis-sellsy
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      - sellsy-network
+
+  webhook-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sellsy-listener
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - SELLSY_SIGN_KEY=${SELLSY_SIGN_KEY}
+      - NODE_ENV=production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - redis
+    networks:
+      - sellsy-network
+    restart: unless-stopped
+
+  webhook-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: sellsy-worker
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - SELLSY_CLIENT_ID=${SELLSY_CLIENT_ID}
+      - SELLSY_CLIENT_SECRET=${SELLSY_CLIENT_SECRET}
+      - NODE_ENV=production
+    ports:
+      - "3001:3001"
+    depends_on:
+      - redis
+      - webhook-listener
+    networks:
+      - sellsy-network
+    restart: unless-stopped
+
+networks:
+  sellsy-network:
+    driver: bridge

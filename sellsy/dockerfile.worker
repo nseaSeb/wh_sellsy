@@ -1,0 +1,24 @@
+# Dockerfile.worker
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy source code
+COPY consumer.js ./
+COPY plugins/ ./plugins/
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nodeuser -u 1001
+
+# Change ownership
+RUN chown -R nodeuser:nodejs /app
+USER nodeuser
+
+EXPOSE 3001
+
+CMD ["node", "consumer.js"]

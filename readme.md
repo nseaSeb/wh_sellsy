@@ -7,7 +7,7 @@ L’objectif est de montrer, via un POC, une approche permettant de **répondre 
 Les événements sont poussés dans Redis afin de permettre leur traitement asynchrone et sans perte, indépendamment de leur réception, ce qui permet une réponse ultra-rapide. Même en cas d’erreur, une réponse `200 OK` est renvoyée pour éviter d’être banni par Sellsy.
 
 > ⚠️ Ce code n’est pas destiné à être utilisé tel quel en production, mais il illustre une approche robuste.
-> Il est fortement recommandé de valider la signature du webhook Sellsy — possibke **dans le worker**, afin de ne pas ralentir la réception du webhook mais moins sécure (nécessite d'envoyer la signature ou le header dans REDIS). Une version signed_server.js (non testé) verifie la signature avant envoi vers Redis, plus sécure quelques ms pour la vérification ce qui est insignifiant.
+> Il est fortement recommandé de valider la signature du webhook Sellsy — possible **dans le worker**, afin de ne pas ralentir la réception du webhook mais moins sécure (nécessite d'envoyer la signature ou le header dans REDIS). Une version signed_server.js (non testé pour le moment) verifie la signature avant envoi vers Redis, plus sécure quelques ms pour la vérification ce qui est insignifiant.
 
 
 ---
