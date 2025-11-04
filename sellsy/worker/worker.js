@@ -27,7 +27,7 @@ class SellsyApiClient {
 
   async refreshToken() {
     try {
-      this.logger.info("Refreshing Sellsy API token...");
+      this.logger.info("🔄 Rafraîchissement du token Sellsy...");
 
       const response = await fetch(
         "https://login.sellsy.com/oauth2/access-tokens",
@@ -52,10 +52,10 @@ class SellsyApiClient {
       this.token = data.access_token;
       this.tokenExpiry = Date.now() + data.expires_in * 1000;
 
-      this.logger.info("Sellsy token refreshed successfully");
+      this.logger.info("✅ Token Sellsy rafraîchi avec succès");
       return this.token;
     } catch (error) {
-      this.logger.error("Error refreshing Sellsy token:", error);
+      this.logger.error("❌ Erreur lors du rafraîchissement du token:", error);
       throw error;
     }
   }
@@ -93,33 +93,34 @@ class SellsyApiClient {
           },
         };
 
-        // Ajouter le body si présent
         if (options.body) {
           apiOptions.body = options.body;
         }
 
-        this.logger.debug(`Making API call to: ${url}`);
-        if (options.body) {
-          this.logger.debug(`Request body: ${options.body}`);
-        }
+        this.logger.debug(`🌐 API Call: ${url}`);
 
         const response = await fetch(url, apiOptions);
 
+        // 🔍 LOG de la réponse
+        const statusEmoji = response.ok ? "✅" : "❌";
+        this.logger.info(
+          `${statusEmoji} Response: ${response.status} ${response.statusText}`,
+        );
+
         if (response.status === 401) {
-          this.logger.warn("Received 401, forcing token refresh...");
+          this.logger.warn("🔑 Reçu 401, rafraîchissement forcé du token...");
           forceRefresh = true;
           attempt++;
           continue;
         }
 
         if (!response.ok) {
-          // Récupérer les détails de l'erreur
           let errorBody = "";
           try {
             errorBody = await response.text();
-            this.logger.error(`API Error ${response.status}: ${errorBody}`);
+            this.logger.error(`📝 Détails de l'erreur: ${errorBody}`);
           } catch (e) {
-            errorBody = "Could not read error body";
+            errorBody = "Impossible de lire le corps de l'erreur";
           }
 
           throw new Error(
@@ -127,20 +128,19 @@ class SellsyApiClient {
           );
         }
 
-        return await response.json();
+        const data = await response.json();
+        this.logger.debug("📨 Données de réponse reçues");
+        return data;
       } catch (error) {
         attempt++;
 
         if (attempt >= this.maxRetries) {
-          this.logger.error(
-            `Sellsy API call failed after ${this.maxRetries} attempts:`,
-            error,
-          );
+          this.logger.error(`💥 Échec après ${this.maxRetries} tentatives`);
           throw error;
         }
 
         this.logger.warn(
-          `Sellsy API call attempt ${attempt} failed, retrying...`,
+          `🔄 Tentative ${attempt} échouée, nouvelle tentative...`,
         );
         await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
       }
@@ -169,8 +169,12 @@ function cleanDataForApi(data, propertiesToRemove = []) {
     "pdf_link",
     "owner",
     "date",
+    "delivery_address_id",
+    "invoicing_address_id",
     "amounts",
-    "related",
+    "related", // On retire related car on le reconstruit
+    "rows", // On retire rows car on les transforme
+    "status", // On retire le statut du devis
   ];
 
   const allPropertiesToRemove = [
@@ -200,13 +204,13 @@ class InvoiceCreator {
     const { eventType, relatedtype, relatedobject } = event;
 
     this.logger.info(
-      `Processing webhook: ${relatedtype}.${eventType} for object ${relatedobject?.id}`,
+      `🔍 Traitement webhook: ${relatedtype}.${eventType} pour l'objet ${relatedobject?.id}`,
     );
 
     if (relatedtype === "estimate" && eventType === "docslog") {
       await this.handleEstimateModification(relatedobject);
     } else {
-      this.logger.info(`ℹ️  Event ${relatedtype}.${eventType} ignored`);
+      this.logger.info(`ℹ️  Événement ${relatedtype}.${eventType} ignoré`);
     }
   }
 
@@ -216,10 +220,10 @@ class InvoiceCreator {
     try {
       if (this.isEstimateAccepted(estimate)) {
         this.logger.info(
-          `📄 Estimate ${estimateId} accepted, creating invoice...`,
+          `📄 Devis ${estimateId} accepté, création de la facture...`,
         );
 
-        // Récupérer les détails complets du devis (avec les items)
+        // Récupérer les détails complets du devis
         const fullEstimate = await this.getEstimateDetails(estimateId);
 
         // Créer la facture
@@ -229,23 +233,26 @@ class InvoiceCreator {
         );
 
         this.logger.info(
-          `✅ Invoice ${invoice.id} created successfully from estimate ${estimateId}`,
+          `✅ Facture ${invoice.id} créée avec succès depuis le devis ${estimateId}`,
         );
 
         await this.linkInvoiceToEstimate(estimateId, invoice.id);
       } else {
         this.logger.info(
-          `📄 Estimate ${estimateId} status: ${estimate.status} - no action needed`,
+          `📄 Devis ${estimateId} statut: ${estimate.status} - aucune action nécessaire`,
         );
       }
     } catch (error) {
-      this.logger.error(`❌ Failed to process estimate ${estimateId}:`, error);
+      this.logger.error(
+        `❌ Échec du traitement du devis ${estimateId}:`,
+        error,
+      );
       throw error;
     }
   }
 
   async getEstimateDetails(estimateId) {
-    this.logger.info(`Fetching full details for estimate ${estimateId}...`);
+    this.logger.info(`📥 Récupération des détails du devis ${estimateId}...`);
 
     const estimate = await this.sellsyApi.makeApiCall(
       `https://api.sellsy.com/v2/estimates/${estimateId}`,
@@ -260,7 +267,7 @@ class InvoiceCreator {
   }
 
   async createInvoiceFromEstimate(fullEstimate, webhookEstimate) {
-    this.logger.info(`Creating invoice from estimate ${fullEstimate.id}...`);
+    this.logger.info(`🎯 Création facture depuis devis ${fullEstimate.id}...`);
 
     // Récupérer l'ID du client depuis le webhook
     const clientId = webhookEstimate.related?.find(
@@ -268,62 +275,86 @@ class InvoiceCreator {
     )?.id;
 
     if (!clientId) {
-      throw new Error("No client found in estimate");
+      throw new Error("❌ Client introuvable dans le devis");
     }
 
-    // Base de la facture
+    // Construction de la facture selon la doc Sellsy v2
     const invoiceData = {
-      related: { id: clientId, type: "company" },
+      subject: webhookEstimate.subject || `Facture - ${webhookEstimate.number}`,
       currency: webhookEstimate.currency || "EUR",
-      subject: webhookEstimate.subject || "Facture",
-      rows: this.transformEstimateItemsToInvoiceRows(fullEstimate.rows || []), // "rows" au lieu de "items"
+      related: [
+        {
+          id: clientId,
+          type: "company",
+        },
+      ],
+      rows: this.transformEstimateItemsToInvoiceRows(fullEstimate.rows || []),
     };
 
-    // Nettoyer et ajouter les champs optionnels du webhook
+    // Nettoyage des données
     const cleanedWebhookData = cleanDataForApi(webhookEstimate);
 
-    // Fusionner les données nettoyées
+    // Fusion
     const finalInvoiceData = {
       ...cleanedWebhookData,
-      ...invoiceData, // Override avec nos données spécifiques
+      ...invoiceData,
     };
 
-    this.logger.info(
-      "Invoice payload:",
-      JSON.stringify(finalInvoiceData, null, 2),
-    );
+    // 🔍 LOG de la payload
+    this.logger.info("📦 Payload envoyé à l'API Sellsy:");
+    console.log("=== PAYLOAD COMPLET ===");
+    console.log(JSON.stringify(finalInvoiceData, null, 2));
+    console.log("=======================");
 
-    const invoice = await this.sellsyApi.makeApiCall(
-      "https://api.sellsy.com/v2/invoices",
-      {
-        method: "POST",
-        body: JSON.stringify(finalInvoiceData),
-      },
-    );
+    try {
+      this.logger.info("🚀 Envoi vers API Sellsy...");
 
-    return invoice;
+      const invoice = await this.sellsyApi.makeApiCall(
+        "https://api.sellsy.com/v2/invoices",
+        {
+          method: "POST",
+          body: JSON.stringify(finalInvoiceData),
+        },
+      );
+
+      this.logger.info(`✅ Facture créée avec succès! ID: ${invoice.id}`);
+      return invoice;
+    } catch (error) {
+      this.logger.error("❌ Erreur lors de la création de la facture");
+      throw error;
+    }
   }
+
   transformEstimateItemsToInvoiceRows(estimateRows) {
     if (!Array.isArray(estimateRows) || estimateRows.length === 0) {
-      this.logger.warn("No rows found in estimate");
+      this.logger.warn("⚠️ Aucune ligne trouvée dans le devis");
       return [];
     }
 
-    return estimateRows.map((row) => {
+    this.logger.info(`📋 Transformation de ${estimateRows.length} lignes...`);
+
+    return estimateRows.map((row, index) => {
       const invoiceRow = {
-        description: row.description || "",
-        quantity: row.quantity || 1,
-        unitAmount: row.unitAmount || 0,
+        type: "single", // Champ requis selon la doc
+        description: row.description || `Ligne ${index + 1}`,
+        quantity: row.quantity?.toString() || "1",
+        unit_amount: (row.unitAmount || row.unit_amount || "0").toString(),
       };
 
-      if (row.product?.id) {
-        invoiceRow.product = { id: row.product.id };
-      }
-
+      // Gérer la taxe
       if (row.tax?.id) {
-        invoiceRow.tax = { id: row.tax.id };
+        invoiceRow.tax_id = row.tax.id;
+      } else if (row.tax1?.id) {
+        invoiceRow.tax_id = row.tax1.id;
       }
 
+      // Gérer le produit
+      if (row.product?.id) {
+        invoiceRow.reference =
+          row.product.reference || `prod_${row.product.id}`;
+      }
+
+      this.logger.debug(`➡️ Ligne ${index + 1}: ${invoiceRow.description}`);
       return invoiceRow;
     });
   }
@@ -331,7 +362,7 @@ class InvoiceCreator {
   async linkInvoiceToEstimate(estimateId, invoiceId) {
     try {
       this.logger.info(
-        `🔗 Linking invoice ${invoiceId} to estimate ${estimateId}`,
+        `🔗 Liaison facture ${invoiceId} au devis ${estimateId}`,
       );
 
       await this.sellsyApi.makeApiCall(
@@ -345,8 +376,12 @@ class InvoiceCreator {
           }),
         },
       );
+
+      this.logger.info("✅ Liaison effectuée avec succès");
     } catch (error) {
-      this.logger.warn(`Could not link invoice to estimate: ${error.message}`);
+      this.logger.warn(
+        `⚠️ Impossible de lier la facture au devis: ${error.message}`,
+      );
     }
   }
 }
@@ -355,12 +390,12 @@ class InvoiceCreator {
 async function startWorker() {
   // Initialiser l'API Sellsy pour le worker
   await sellsyApi.getToken();
-  console.log("✅ Sellsy API initialized for worker");
+  console.log("✅ API Sellsy initialisée pour le worker");
 
   const worker = new Worker(
     "sellsy-webhooks",
     async (job) => {
-      console.log(`🎯 Processing job ${job.id}: ${job.name}`);
+      console.log(`🎯 Traitement job ${job.id}: ${job.name}`);
 
       try {
         const invoiceCreator = new InvoiceCreator(sellsyApi, app.log);
@@ -373,7 +408,7 @@ async function startWorker() {
           timestamp: new Date().toISOString(),
         };
       } catch (error) {
-        console.error(`Error in job ${job.id}:`, error);
+        console.error(`❌ Erreur dans le job ${job.id}:`, error);
         throw error;
       }
     },
@@ -386,7 +421,7 @@ async function startWorker() {
   );
 
   worker.on("completed", (job) => {
-    app.log.info(`✅ Job ${job.id} completed successfully`);
+    app.log.info(`✅ Job ${job.id} terminé avec succès`);
   });
 
   worker.on("failed", (job, err) => {
@@ -397,16 +432,16 @@ async function startWorker() {
         stack: err.stack,
         jobData: job?.data,
       },
-      `❌ Job ${job?.id} failed`,
+      `❌ Job ${job?.id} échoué`,
     );
   });
 
   worker.on("error", (err) => {
-    app.log.error("🔥 Worker error:", err);
+    app.log.error("🔥 Erreur worker:", err);
   });
 
   app.log.info(
-    "👷 Sellsy Invoice Creator started - Waiting for accepted estimates...",
+    "👷 Sellsy Invoice Creator démarré - En attente des devis acceptés...",
   );
 }
 
@@ -445,7 +480,7 @@ const start = async () => {
 };
 
 process.on("SIGINT", async () => {
-  app.log.info("Shutting down gracefully...");
+  app.log.info("Arrêt gracieux...");
   await app.close();
   process.exit(0);
 });
