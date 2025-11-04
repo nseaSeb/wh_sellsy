@@ -149,43 +149,41 @@ class InvoiceCreator {
   }
 
   async processEvent(event) {
-    const { type, data, resource } = event;
+    const { eventType, relatedtype, relatedobject } = event;
 
     this.fastify.log.info(
-      `Processing webhook: ${resource}.${type} for object ${data.id}`,
+      `Processing webhook: ${relatedtype}.${eventType} for object ${relatedobject?.id}`,
     );
 
-    // On s'intéresse uniquement aux devis acceptés
-    if (resource === "estimate" && type === "modification") {
-      await this.handleEstimateModification(data);
+    if (relatedtype === "estimate" && eventType === "docslog") {
+      await this.handleEstimateModification(relatedobject);
     } else {
-      this.fastify.log.info(
-        `ℹ️  Event ${resource}.${type} ignored - not a relevant estimate modification`,
-      );
+      this.fastify.log.info(`ℹ️  Event ${relatedtype}.${eventType} ignored`);
     }
   }
 
-  async handleEstimateModification(data) {
-    const estimateId = data.id;
+  async handleEstimateModification(estimate) {
+    const estimateId = estimate.id;
 
     try {
-      // 1. Récupérer les détails du devis
-      const estimate = await this.getEstimateDetails(estimateId);
-
-      // 2. Vérifier si le devis est accepté
       if (this.isEstimateAccepted(estimate)) {
         this.fastify.log.info(
           `📄 Estimate ${estimateId} accepted, creating invoice...`,
         );
 
-        // 3. Créer la facture
-        const invoice = await this.createInvoiceFromEstimate(estimate);
+        // Récupérer les détails complets du devis (avec les items)
+        const fullEstimate = await this.getEstimateDetails(estimateId);
+
+        // Créer la facture
+        const invoice = await this.createInvoiceFromEstimate(
+          fullEstimate,
+          estimate,
+        );
 
         this.fastify.log.info(
           `✅ Invoice ${invoice.id} created successfully from estimate ${estimateId}`,
         );
 
-        // 4. Optionnel : Lier la facture au devis
         await this.linkInvoiceToEstimate(estimateId, invoice.id);
       } else {
         this.fastify.log.info(
@@ -202,7 +200,15 @@ class InvoiceCreator {
   }
 
   async getEstimateDetails(estimateId) {
-    this.fastify.log.info(`Fetching details for estimate ${estimateId}...`);
+    this.fastify.log.info(
+      `Fetching full details for estimate ${estimateId}...`,
+    );
+
+    // Debug temporaire
+    this.fastify.log.info(`sellsyApi available: ${!!this.fastify.sellsyApi}`);
+    this.fastify.log.info(
+      `sellsyApi keys: ${Object.keys(this.fastify.sellsyApi || {})}`,
+    );
 
     const estimate = await this.fastify.sellsyApi.makeApiCall(
       `https://api.sellsy.com/v2/estimates/${estimateId}`,
@@ -212,31 +218,43 @@ class InvoiceCreator {
   }
 
   isEstimateAccepted(estimate) {
-    // Les statuts peuvent varier selon votre configuration Sellsy
     const acceptedStatuses = ["accepted", "won", "signed"];
     return acceptedStatuses.includes(estimate.status);
   }
 
-  async createInvoiceFromEstimate(estimate) {
-    this.fastify.log.info(`Creating invoice from estimate ${estimate.id}...`);
+  async createInvoiceFromEstimate(fullEstimate, webhookEstimate) {
+    this.fastify.log.info(
+      `Creating invoice from estimate ${fullEstimate.id}...`,
+    );
 
-    // Construction de la facture basée sur le devis
+    // Récupérer l'ID du client depuis le webhook
+    const clientId = webhookEstimate.related?.find(
+      (r) => r.type === "company",
+    )?.id;
+
+    if (!clientId) {
+      throw new Error("No client found in estimate");
+    }
+
     const invoiceData = {
-      third: {
-        id: estimate.third.id, // Le même client
-      },
-      currency: estimate.currency,
-      subject: `Facture - ${estimate.subject || "Sans objet"}`,
-      dated: new Date().toISOString().split("T")[0], // Date du jour
-      items: this.transformEstimateItemsToInvoiceItems(estimate.items),
-      // Vous pouvez ajouter d'autres champs spécifiques
-      conditions: estimate.conditions || "",
-      note: estimate.note || "",
-      // Lien vers le devis d'origine (dans un champ personnalisé si disponible)
-      customFields: {
-        source_estimate: estimate.id,
-      },
+      third: { id: clientId },
+      currency: webhookEstimate.currency || "EUR",
+      subject: webhookEstimate.subject || "Facture",
+      dated: new Date().toISOString().split("T")[0],
+      items: this.transformEstimateItemsToInvoiceItems(
+        fullEstimate.items || [],
+      ),
     };
+
+    // Ajouter conditionnellement les champs optionnels
+    if (webhookEstimate.note) {
+      invoiceData.note = webhookEstimate.note;
+    }
+
+    this.fastify.log.info(
+      "Invoice payload:",
+      JSON.stringify(invoiceData, null, 2),
+    );
 
     const invoice = await this.fastify.sellsyApi.makeApiCall(
       "https://api.sellsy.com/v2/invoices",
@@ -250,29 +268,40 @@ class InvoiceCreator {
   }
 
   transformEstimateItemsToInvoiceItems(estimateItems) {
-    return estimateItems.map((item) => ({
-      itemType: "product", // ou 'service' selon votre cas
-      product: {
-        id: item.product?.id,
-      },
-      description: item.description,
-      quantity: item.quantity,
-      unitAmount: item.unitAmount,
-      tax1: item.tax1,
-      tax2: item.tax2,
-      // Ajouter d'autres champs si nécessaire
-    }));
+    if (!Array.isArray(estimateItems) || estimateItems.length === 0) {
+      this.fastify.log.warn("No items found in estimate");
+      return [];
+    }
+
+    return estimateItems.map((item) => {
+      const invoiceItem = {
+        description: item.description || "",
+        quantity: item.quantity || 1,
+        unitAmount: item.unitAmount || 0,
+      };
+
+      if (item.product?.id) {
+        invoiceItem.product = { id: item.product.id };
+      }
+
+      if (item.tax1?.id) {
+        invoiceItem.tax1 = { id: item.tax1.id };
+      }
+
+      if (item.tax2?.id) {
+        invoiceItem.tax2 = { id: item.tax2.id };
+      }
+
+      return invoiceItem;
+    });
   }
 
   async linkInvoiceToEstimate(estimateId, invoiceId) {
     try {
-      // Cette partie dépend de votre configuration Sellsy
-      // Vous pouvez utiliser les champs personnalisés ou une autre méthode
       this.fastify.log.info(
-        `🔗 Linked invoice ${invoiceId} to estimate ${estimateId}`,
+        `🔗 Linking invoice ${invoiceId} to estimate ${estimateId}`,
       );
 
-      // Optionnel : Mettre à jour le devis pour référencer la facture
       await this.fastify.sellsyApi.makeApiCall(
         `https://api.sellsy.com/v2/estimates/${estimateId}`,
         {
@@ -285,7 +314,6 @@ class InvoiceCreator {
         },
       );
     } catch (error) {
-      // Ne pas bloquer le processus si le linking échoue
       this.fastify.log.warn(
         `Could not link invoice to estimate: ${error.message}`,
       );
@@ -295,31 +323,44 @@ class InvoiceCreator {
 
 // --- Worker BullMQ ---
 
+// --- Worker BullMQ ---
+
 async function startWorker() {
+  // 1. Enregistrer le plugin AVANT de créer InvoiceCreator
   await app.register(apiConnection, {
     clientId: process.env.SELLSY_CLIENT_ID,
     clientSecret: process.env.SELLSY_CLIENT_SECRET,
     maxRetries: 3,
   });
 
+  // 2. Attendre que Fastify soit prêt (tous les hooks onReady exécutés)
+  await app.ready();
+
+  // 3. MAINTENANT créer InvoiceCreator (sellsyApi existe)
   const invoiceCreator = new InvoiceCreator(app);
 
   const worker = new Worker(
     "sellsy-webhooks",
     async (job) => {
-      app.log.info(`🎯 Processing job ${job.id}: ${job.name}`);
+      console.log(`🎯 Processing job ${job.id}: ${job.name}`);
+      console.log("Job data:", JSON.stringify(job.data, null, 2));
 
-      await invoiceCreator.processEvent(job.data);
+      try {
+        await invoiceCreator.processEvent(job.data);
 
-      return {
-        success: true,
-        jobId: job.id,
-        timestamp: new Date().toISOString(),
-      };
+        return {
+          success: true,
+          jobId: job.id,
+          timestamp: new Date().toISOString(),
+        };
+      } catch (error) {
+        console.error(`Error in job ${job.id}:`, error);
+        throw error;
+      }
     },
     {
       connection: redis,
-      concurrency: 3, // Traite 3 jobs en parallèle
+      concurrency: 3,
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 50 },
     },
@@ -330,7 +371,15 @@ async function startWorker() {
   });
 
   worker.on("failed", (job, err) => {
-    app.log.error(`❌ Job ${job?.id} failed:`, err);
+    app.log.error(
+      {
+        jobId: job?.id,
+        error: err.message,
+        stack: err.stack,
+        jobData: job?.data,
+      },
+      `❌ Job ${job?.id} failed`,
+    );
   });
 
   worker.on("error", (err) => {
