@@ -294,6 +294,7 @@ class InvoiceCreator {
 }
 
 // --- Worker BullMQ ---
+
 async function startWorker() {
   await app.register(apiConnection, {
     clientId: process.env.SELLSY_CLIENT_ID,
@@ -364,8 +365,12 @@ app.get("/health", async (request, reply) => {
 // --- Démarrage ---
 const start = async () => {
   try {
-    await app.listen({ port: 3001, host: "0.0.0.0" });
+    // 1. D'ABORD : enregistrer le plugin et créer le worker
     await startWorker();
+
+    // 2. ENSUITE : démarrer le serveur HTTP
+    await app.listen({ port: 3001, host: "0.0.0.0" });
+
     console.log("🚀 Sellsy Invoice Creator prêt sur le port 3001");
     console.log("📋 En attente des devis acceptés...");
   } catch (err) {

@@ -15,7 +15,7 @@ services:
   webhook-listener:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: dockerfile
     container_name: sellsy-listener
     environment:
       - REDIS_HOST=redis
@@ -32,8 +32,8 @@ services:
 
   webhook-worker:
     build:
-      context: .
-      dockerfile: Dockerfile.worker
+      context: ./worker
+      dockerfile: dockerfile.worker
     container_name: sellsy-worker
     environment:
       - REDIS_HOST=redis
