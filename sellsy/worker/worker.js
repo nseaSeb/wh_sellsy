@@ -13,17 +13,21 @@ const redis = new IORedis({
 // --- Fastify pour la gestion API ---
 const app = Fastify({ logger: true });
 
-// Plugin de connexion API Sellsy
-async function apiConnection(fastify, options) {
-  const { clientId, clientSecret, maxRetries = 3 } = options;
+// --- Client API Sellsy ---
+class SellsyApiClient {
+  constructor(clientId, clientSecret, logger, maxRetries = 3) {
+    this.clientId = clientId;
+    this.clientSecret = clientSecret;
+    this.logger = logger;
+    this.maxRetries = maxRetries;
+    this.token = null;
+    this.tokenExpiry = null;
+    this.refreshPromise = null;
+  }
 
-  let token = null;
-  let tokenExpiry = null;
-  let refreshPromise = null;
-
-  async function refreshToken() {
+  async refreshToken() {
     try {
-      fastify.log.info("Refreshing Sellsy API token...");
+      this.logger.info("Refreshing Sellsy API token...");
 
       const response = await fetch(
         "https://login.sellsy.com/oauth2/access-tokens",
@@ -34,8 +38,8 @@ async function apiConnection(fastify, options) {
           },
           body: JSON.stringify({
             grant_type: "client_credentials",
-            client_id: clientId,
-            client_secret: clientSecret,
+            client_id: this.clientId,
+            client_secret: this.clientSecret,
           }),
         },
       );
@@ -45,39 +49,40 @@ async function apiConnection(fastify, options) {
       }
 
       const data = await response.json();
-      token = data.access_token;
-      tokenExpiry = Date.now() + data.expires_in * 1000;
+      this.token = data.access_token;
+      this.tokenExpiry = Date.now() + data.expires_in * 1000;
 
-      fastify.log.info("Sellsy token refreshed successfully");
-      return token;
+      this.logger.info("Sellsy token refreshed successfully");
+      return this.token;
     } catch (error) {
-      fastify.log.error("Error refreshing Sellsy token:", error);
+      this.logger.error("Error refreshing Sellsy token:", error);
       throw error;
     }
   }
 
-  async function getToken(forceRefresh = false) {
-    const isExpired = !tokenExpiry || Date.now() >= tokenExpiry - 60000;
+  async getToken(forceRefresh = false) {
+    const isExpired =
+      !this.tokenExpiry || Date.now() >= this.tokenExpiry - 60000;
 
-    if (!token || isExpired || forceRefresh) {
-      if (!refreshPromise) {
-        refreshPromise = refreshToken().finally(() => {
-          refreshPromise = null;
+    if (!this.token || isExpired || forceRefresh) {
+      if (!this.refreshPromise) {
+        this.refreshPromise = this.refreshToken().finally(() => {
+          this.refreshPromise = null;
         });
       }
-      return await refreshPromise;
+      return await this.refreshPromise;
     }
 
-    return token;
+    return this.token;
   }
 
-  async function makeApiCall(url, options = {}) {
+  async makeApiCall(url, options = {}) {
     let attempt = 0;
     let forceRefresh = false;
 
-    while (attempt < maxRetries) {
+    while (attempt < this.maxRetries) {
       try {
-        const token = await getToken(forceRefresh);
+        const token = await this.getToken(forceRefresh);
 
         const apiOptions = {
           ...options,
@@ -88,18 +93,37 @@ async function apiConnection(fastify, options) {
           },
         };
 
+        // Ajouter le body si présent
+        if (options.body) {
+          apiOptions.body = options.body;
+        }
+
+        this.logger.debug(`Making API call to: ${url}`);
+        if (options.body) {
+          this.logger.debug(`Request body: ${options.body}`);
+        }
+
         const response = await fetch(url, apiOptions);
 
         if (response.status === 401) {
-          fastify.log.warn("Received 401, forcing token refresh...");
+          this.logger.warn("Received 401, forcing token refresh...");
           forceRefresh = true;
           attempt++;
           continue;
         }
 
         if (!response.ok) {
+          // Récupérer les détails de l'erreur
+          let errorBody = "";
+          try {
+            errorBody = await response.text();
+            this.logger.error(`API Error ${response.status}: ${errorBody}`);
+          } catch (e) {
+            errorBody = "Could not read error body";
+          }
+
           throw new Error(
-            `Sellsy API error: ${response.status} ${response.statusText}`,
+            `Sellsy API error: ${response.status} ${response.statusText} - ${errorBody}`,
           );
         }
 
@@ -107,58 +131,82 @@ async function apiConnection(fastify, options) {
       } catch (error) {
         attempt++;
 
-        if (attempt >= maxRetries) {
-          fastify.log.error(
-            `Sellsy API call failed after ${maxRetries} attempts:`,
+        if (attempt >= this.maxRetries) {
+          this.logger.error(
+            `Sellsy API call failed after ${this.maxRetries} attempts:`,
             error,
           );
           throw error;
         }
 
-        fastify.log.warn(
+        this.logger.warn(
           `Sellsy API call attempt ${attempt} failed, retrying...`,
         );
         await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
       }
     }
   }
+}
 
-  fastify.decorate("sellsyApi", {
-    getToken,
-    makeApiCall,
-    forceRefresh: () => getToken(true),
-  });
+// Créer l'instance du client API pour le worker
+const sellsyApi = new SellsyApiClient(
+  process.env.SELLSY_CLIENT_ID,
+  process.env.SELLSY_CLIENT_SECRET,
+  app.log,
+  3,
+);
 
-  // Initialisation
-  fastify.addHook("onReady", async () => {
-    try {
-      await getToken();
-      fastify.log.info(
-        "Sellsy API connection initialized for invoice creation",
-      );
-    } catch (error) {
-      fastify.log.error("Failed to initialize Sellsy API connection:", error);
-    }
-  });
+// Fonction utilitaire pour nettoyer les données avant envoi API
+function cleanDataForApi(data, propertiesToRemove = []) {
+  if (!data || typeof data !== "object") return data;
+
+  const defaultPropertiesToRemove = [
+    "id",
+    "created",
+    "fiscal_year_id",
+    "number",
+    "public_link",
+    "pdf_link",
+    "owner",
+    "date",
+    "amounts",
+    "related",
+  ];
+
+  const allPropertiesToRemove = [
+    ...defaultPropertiesToRemove,
+    ...propertiesToRemove,
+  ];
+
+  return Object.fromEntries(
+    Object.entries(data).filter(
+      ([key, value]) =>
+        value !== null &&
+        value !== undefined &&
+        value !== "" &&
+        !allPropertiesToRemove.includes(key),
+    ),
+  );
 }
 
 // --- Traitement spécifique pour les devis acceptés ---
 class InvoiceCreator {
-  constructor(fastify) {
-    this.fastify = fastify;
+  constructor(sellsyApi, logger) {
+    this.sellsyApi = sellsyApi;
+    this.logger = logger;
   }
 
   async processEvent(event) {
     const { eventType, relatedtype, relatedobject } = event;
 
-    this.fastify.log.info(
+    this.logger.info(
       `Processing webhook: ${relatedtype}.${eventType} for object ${relatedobject?.id}`,
     );
 
     if (relatedtype === "estimate" && eventType === "docslog") {
       await this.handleEstimateModification(relatedobject);
     } else {
-      this.fastify.log.info(`ℹ️  Event ${relatedtype}.${eventType} ignored`);
+      this.logger.info(`ℹ️  Event ${relatedtype}.${eventType} ignored`);
     }
   }
 
@@ -167,7 +215,7 @@ class InvoiceCreator {
 
     try {
       if (this.isEstimateAccepted(estimate)) {
-        this.fastify.log.info(
+        this.logger.info(
           `📄 Estimate ${estimateId} accepted, creating invoice...`,
         );
 
@@ -180,37 +228,26 @@ class InvoiceCreator {
           estimate,
         );
 
-        this.fastify.log.info(
+        this.logger.info(
           `✅ Invoice ${invoice.id} created successfully from estimate ${estimateId}`,
         );
 
         await this.linkInvoiceToEstimate(estimateId, invoice.id);
       } else {
-        this.fastify.log.info(
+        this.logger.info(
           `📄 Estimate ${estimateId} status: ${estimate.status} - no action needed`,
         );
       }
     } catch (error) {
-      this.fastify.log.error(
-        `❌ Failed to process estimate ${estimateId}:`,
-        error,
-      );
+      this.logger.error(`❌ Failed to process estimate ${estimateId}:`, error);
       throw error;
     }
   }
 
   async getEstimateDetails(estimateId) {
-    this.fastify.log.info(
-      `Fetching full details for estimate ${estimateId}...`,
-    );
+    this.logger.info(`Fetching full details for estimate ${estimateId}...`);
 
-    // Debug temporaire
-    this.fastify.log.info(`sellsyApi available: ${!!this.fastify.sellsyApi}`);
-    this.fastify.log.info(
-      `sellsyApi keys: ${Object.keys(this.fastify.sellsyApi || {})}`,
-    );
-
-    const estimate = await this.fastify.sellsyApi.makeApiCall(
+    const estimate = await this.sellsyApi.makeApiCall(
       `https://api.sellsy.com/v2/estimates/${estimateId}`,
     );
 
@@ -223,9 +260,7 @@ class InvoiceCreator {
   }
 
   async createInvoiceFromEstimate(fullEstimate, webhookEstimate) {
-    this.fastify.log.info(
-      `Creating invoice from estimate ${fullEstimate.id}...`,
-    );
+    this.logger.info(`Creating invoice from estimate ${fullEstimate.id}...`);
 
     // Récupérer l'ID du client depuis le webhook
     const clientId = webhookEstimate.related?.find(
@@ -236,73 +271,70 @@ class InvoiceCreator {
       throw new Error("No client found in estimate");
     }
 
+    // Base de la facture
     const invoiceData = {
-      third: { id: clientId },
+      related: { id: clientId, type: "company" },
       currency: webhookEstimate.currency || "EUR",
       subject: webhookEstimate.subject || "Facture",
-      dated: new Date().toISOString().split("T")[0],
-      items: this.transformEstimateItemsToInvoiceItems(
-        fullEstimate.items || [],
-      ),
+      rows: this.transformEstimateItemsToInvoiceRows(fullEstimate.rows || []), // "rows" au lieu de "items"
     };
 
-    // Ajouter conditionnellement les champs optionnels
-    if (webhookEstimate.note) {
-      invoiceData.note = webhookEstimate.note;
-    }
+    // Nettoyer et ajouter les champs optionnels du webhook
+    const cleanedWebhookData = cleanDataForApi(webhookEstimate);
 
-    this.fastify.log.info(
+    // Fusionner les données nettoyées
+    const finalInvoiceData = {
+      ...cleanedWebhookData,
+      ...invoiceData, // Override avec nos données spécifiques
+    };
+
+    this.logger.info(
       "Invoice payload:",
-      JSON.stringify(invoiceData, null, 2),
+      JSON.stringify(finalInvoiceData, null, 2),
     );
 
-    const invoice = await this.fastify.sellsyApi.makeApiCall(
+    const invoice = await this.sellsyApi.makeApiCall(
       "https://api.sellsy.com/v2/invoices",
       {
         method: "POST",
-        body: JSON.stringify(invoiceData),
+        body: JSON.stringify(finalInvoiceData),
       },
     );
 
     return invoice;
   }
-
-  transformEstimateItemsToInvoiceItems(estimateItems) {
-    if (!Array.isArray(estimateItems) || estimateItems.length === 0) {
-      this.fastify.log.warn("No items found in estimate");
+  transformEstimateItemsToInvoiceRows(estimateRows) {
+    if (!Array.isArray(estimateRows) || estimateRows.length === 0) {
+      this.logger.warn("No rows found in estimate");
       return [];
     }
 
-    return estimateItems.map((item) => {
-      const invoiceItem = {
-        description: item.description || "",
-        quantity: item.quantity || 1,
-        unitAmount: item.unitAmount || 0,
+    return estimateRows.map((row) => {
+      const invoiceRow = {
+        description: row.description || "",
+        quantity: row.quantity || 1,
+        unitAmount: row.unitAmount || 0,
       };
 
-      if (item.product?.id) {
-        invoiceItem.product = { id: item.product.id };
+      if (row.product?.id) {
+        invoiceRow.product = { id: row.product.id };
       }
 
-      if (item.tax1?.id) {
-        invoiceItem.tax1 = { id: item.tax1.id };
+      if (row.tax?.id) {
+        invoiceRow.tax = { id: row.tax.id };
       }
 
-      if (item.tax2?.id) {
-        invoiceItem.tax2 = { id: item.tax2.id };
-      }
-
-      return invoiceItem;
+      return invoiceRow;
     });
   }
 
   async linkInvoiceToEstimate(estimateId, invoiceId) {
     try {
-      this.fastify.log.info(
+      this.logger.info(
         `🔗 Linking invoice ${invoiceId} to estimate ${estimateId}`,
       );
 
-      await this.fastify.sellsyApi.makeApiCall(
+      await this.sellsyApi.makeApiCall(
         `https://api.sellsy.com/v2/estimates/${estimateId}`,
         {
           method: "PATCH",
@@ -314,38 +346,25 @@ class InvoiceCreator {
         },
       );
     } catch (error) {
-      this.fastify.log.warn(
-        `Could not link invoice to estimate: ${error.message}`,
-      );
+      this.logger.warn(`Could not link invoice to estimate: ${error.message}`);
     }
   }
 }
 
 // --- Worker BullMQ ---
-
-// --- Worker BullMQ ---
-
 async function startWorker() {
-  // 1. Enregistrer le plugin AVANT de créer InvoiceCreator
-  await app.register(apiConnection, {
-    clientId: process.env.SELLSY_CLIENT_ID,
-    clientSecret: process.env.SELLSY_CLIENT_SECRET,
-    maxRetries: 3,
-  });
-
-  // 2. Attendre que Fastify soit prêt (tous les hooks onReady exécutés)
-  await app.ready();
-
-  // 3. MAINTENANT créer InvoiceCreator (sellsyApi existe)
-  const invoiceCreator = new InvoiceCreator(app);
+  // Initialiser l'API Sellsy pour le worker
+  await sellsyApi.getToken();
+  console.log("✅ Sellsy API initialized for worker");
 
   const worker = new Worker(
     "sellsy-webhooks",
     async (job) => {
       console.log(`🎯 Processing job ${job.id}: ${job.name}`);
-      console.log("Job data:", JSON.stringify(job.data, null, 2));
 
       try {
+        const invoiceCreator = new InvoiceCreator(sellsyApi, app.log);
+
         await invoiceCreator.processEvent(job.data);
 
         return {
@@ -394,7 +413,7 @@ async function startWorker() {
 // --- Health check ---
 app.get("/health", async (request, reply) => {
   try {
-    const token = await app.sellsyApi.getToken();
+    const token = await sellsyApi.getToken();
 
     return {
       status: "healthy",
@@ -414,13 +433,10 @@ app.get("/health", async (request, reply) => {
 // --- Démarrage ---
 const start = async () => {
   try {
-    // 1. D'ABORD : enregistrer le plugin et créer le worker
-    await startWorker();
-
-    // 2. ENSUITE : démarrer le serveur HTTP
     await app.listen({ port: 3001, host: "0.0.0.0" });
-
     console.log("🚀 Sellsy Invoice Creator prêt sur le port 3001");
+
+    await startWorker();
     console.log("📋 En attente des devis acceptés...");
   } catch (err) {
     app.log.error(err);
