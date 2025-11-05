@@ -11,6 +11,17 @@ Les événements sont poussés dans Redis afin de permettre leur traitement asyn
 
 
 ---
+## Sellsy exemple complet dans le dossier Sellsy
+
+1. 📨 **Réception** du webhook Sellsy (ex: `estimate.docslog`)
+2. 🔒 **Vérification** de la signature HMAC
+3. 🚀 **Insertion** immédiate dans la file Redis (BullMQ)
+4. ✅ **Réponse** 200 OK instantanée à Sellsy
+5. ⚙️ **Traitement** asynchrone par le worker :
+   - Si le devis est `accepted` → création automatique de la facture via l'API Sellsy V2
+   - Sinon → le job est consommé sans action
+
+---
 
 ## 🧩 Architecture
 
