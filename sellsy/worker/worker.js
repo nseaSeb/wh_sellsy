@@ -236,7 +236,6 @@ class InvoiceCreator {
           `✅ Facture ${invoice.id} créée avec succès depuis le devis ${estimateId}`,
         );
 
-        await this.linkInvoiceToEstimate(estimateId, invoice.id);
       } else {
         this.logger.info(
           `📄 Devis ${estimateId} statut: ${estimate.status} - aucune action nécessaire`,
@@ -360,32 +359,6 @@ class InvoiceCreator {
     });
   }
 
-  async linkInvoiceToEstimate(estimateId, invoiceId) {
-    try {
-      this.logger.info(
-        `🔗 Liaison facture ${invoiceId} au devis ${estimateId}`,
-      );
-
-      await this.sellsyApi.makeApiCall(
-        `https://api.sellsy.com/v2/estimates/${estimateId}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            customFields: {
-              generated_invoice: invoiceId,
-            },
-          }),
-        },
-      );
-
-      this.logger.info("✅ Liaison effectuée avec succès");
-    } catch (error) {
-      this.logger.warn(
-        `⚠️ Impossible de lier la facture au devis: ${error.message}`,
-      );
-    }
-  }
-}
 
 // --- Worker BullMQ ---
 async function startWorker() {
