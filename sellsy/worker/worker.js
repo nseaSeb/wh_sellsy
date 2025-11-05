@@ -282,6 +282,7 @@ class InvoiceCreator {
     const invoiceData = {
       subject: webhookEstimate.subject || `Facture - ${webhookEstimate.number}`,
       currency: webhookEstimate.currency || "EUR",
+      parent: { type: "estimate", id: fullEstimate.id },
       related: [
         {
           id: clientId,
