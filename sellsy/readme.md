@@ -146,10 +146,10 @@ Cela démarre :
 ```bash
 ngrok http 3000
 ```
-![Configuration Ngrok](image.png)
+![Configuration Ngrok](./images/image.png)
 
 Configuration WH avec NGROK
-![alt text](image-2.png)
+![alt text](./images/image-2.png)
 Utiliser l'URL fournie par Ngrok pour configurer le webhook dans Sellsy et ajoutez l'URI /webhook/sellsy
 
 ---
@@ -229,7 +229,7 @@ Exemple de log :
 ```
 Exemple de log en local dans le terminal.
 
-![alt text](image-1.png)
+![alt text](./images/image-1.png)
 ---
 
 ## 🔒 Sécurité
