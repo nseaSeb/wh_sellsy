@@ -235,7 +235,6 @@ class InvoiceCreator {
         this.logger.info(
           `✅ Facture ${invoice.id} créée avec succès depuis le devis ${estimateId}`,
         );
-
       } else {
         this.logger.info(
           `📄 Devis ${estimateId} statut: ${estimate.status} - aucune action nécessaire`,
@@ -358,7 +357,7 @@ class InvoiceCreator {
       return invoiceRow;
     });
   }
-
+}
 
 // --- Worker BullMQ ---
 async function startWorker() {
