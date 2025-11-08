@@ -275,6 +275,12 @@ Le worker BullMQ traite les événements de manière asynchrone :
 - **Retry automatique** sur erreurs transitoires (3 tentatives)
 - **Dead Letter Queue** pour les échecs définitifs
 - **Logs détaillés** pour débogage
+- **Données redis persistée
+
+Pour retrouver les données persistées
+```bash
+ls -lh ./data/redis/appendonlydir/
+```
 
 ---
 

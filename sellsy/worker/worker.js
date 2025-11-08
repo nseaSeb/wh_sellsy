@@ -3,6 +3,15 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import Fastify from "fastify";
 
+// --- Configuration des retries ---
+const RETRY_CONFIG = {
+  MAX_ATTEMPTS: 10, // Nombre maximum de tentatives
+  INITIAL_DELAY: 5000, // Délai initial: 5 secondes
+  MAX_DELAY: 1800000, // Délai maximum: 30 minutes (1800000 ms)
+  EXPONENTIAL_BASE: 2, // Base pour le backoff exponentiel
+  MAINTENANCE_RETRY_DELAY: 1800000, // 30 minutes pour les 503
+};
+
 // --- Redis setup ---
 const redis = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -12,6 +21,35 @@ const redis = new IORedis({
 
 // --- Fastify pour la gestion API ---
 const app = Fastify({ logger: true });
+
+// --- Calcul du délai de retry avec backoff exponentiel ---
+function calculateRetryDelay(attemptsMade, isMaintenanceError = false) {
+  // Si erreur de maintenance (503), on attend directement 30 minutes
+  if (isMaintenanceError) {
+    return RETRY_CONFIG.MAINTENANCE_RETRY_DELAY;
+  }
+
+  // Backoff exponentiel: delay = INITIAL_DELAY * (base ^ attempt)
+  const exponentialDelay =
+    RETRY_CONFIG.INITIAL_DELAY *
+    Math.pow(RETRY_CONFIG.EXPONENTIAL_BASE, attemptsMade);
+
+  // On plafonne au délai maximum
+  const delay = Math.min(exponentialDelay, RETRY_CONFIG.MAX_DELAY);
+
+  return delay;
+}
+
+// --- Custom Error pour distinguer les types d'erreurs ---
+class ApiError extends Error {
+  constructor(message, statusCode, isRetryable = true) {
+    super(message);
+    this.name = "ApiError";
+    this.statusCode = statusCode;
+    this.isRetryable = isRetryable;
+    this.isMaintenanceError = statusCode === 503;
+  }
+}
 
 // --- Client API Sellsy ---
 class SellsyApiClient {
@@ -114,6 +152,22 @@ class SellsyApiClient {
           continue;
         }
 
+        // Gestion spécifique des erreurs 503 (maintenance)
+        if (response.status === 503) {
+          let errorBody = "";
+          try {
+            errorBody = await response.text();
+          } catch (e) {
+            errorBody = "Impossible de lire le corps de l'erreur";
+          }
+
+          throw new ApiError(
+            `Sellsy API en maintenance: ${errorBody}`,
+            503,
+            true,
+          );
+        }
+
         if (!response.ok) {
           let errorBody = "";
           try {
@@ -123,8 +177,13 @@ class SellsyApiClient {
             errorBody = "Impossible de lire le corps de l'erreur";
           }
 
-          throw new Error(
+          // Erreurs 4xx ne sont généralement pas retryables (sauf 401 géré plus haut)
+          const isRetryable = response.status >= 500;
+
+          throw new ApiError(
             `Sellsy API error: ${response.status} ${response.statusText} - ${errorBody}`,
+            response.status,
+            isRetryable,
           );
         }
 
@@ -132,6 +191,11 @@ class SellsyApiClient {
         this.logger.debug("📨 Données de réponse reçues");
         return data;
       } catch (error) {
+        // Si c'est une ApiError, on la relance directement
+        if (error instanceof ApiError) {
+          throw error;
+        }
+
         attempt++;
 
         if (attempt >= this.maxRetries) {
@@ -359,7 +423,7 @@ class InvoiceCreator {
   }
 }
 
-// --- Worker BullMQ ---
+// --- Worker BullMQ avec retry exponentiel ---
 async function startWorker() {
   // Initialiser l'API Sellsy pour le worker
   await sellsyApi.getToken();
@@ -382,6 +446,22 @@ async function startWorker() {
         };
       } catch (error) {
         console.error(`❌ Erreur dans le job ${job.id}:`, error);
+
+        // Si c'est une erreur non retryable (4xx), on ne retry pas
+        if (error instanceof ApiError && !error.isRetryable) {
+          app.log.error(
+            `🚫 Erreur non retryable (${error.statusCode}), abandon du job`,
+          );
+          // On ne throw pas pour que le job soit marqué comme complété
+          return {
+            success: false,
+            error: error.message,
+            statusCode: error.statusCode,
+            retryable: false,
+          };
+        }
+
+        // Pour les autres erreurs, on throw pour déclencher le retry
         throw error;
       }
     },
@@ -390,23 +470,53 @@ async function startWorker() {
       concurrency: 3,
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 50 },
+      settings: {
+        // Configuration du backoff exponentiel
+        backoff: {
+          type: "custom",
+        },
+      },
     },
   );
 
-  worker.on("completed", (job) => {
-    app.log.info(`✅ Job ${job.id} terminé avec succès`);
+  // Gestion custom du backoff
+  worker.on("failed", async (job, err) => {
+    const attemptsMade = job.attemptsMade;
+    const isMaintenanceError =
+      err instanceof ApiError && err.isMaintenanceError;
+
+    if (attemptsMade < RETRY_CONFIG.MAX_ATTEMPTS) {
+      const delay = calculateRetryDelay(attemptsMade, isMaintenanceError);
+      const delayMinutes = (delay / 60000).toFixed(2);
+
+      if (isMaintenanceError) {
+        app.log.warn(
+          `🛠️ Maintenance détectée - Retry dans ${delayMinutes} minutes (tentative ${attemptsMade + 1}/${RETRY_CONFIG.MAX_ATTEMPTS})`,
+        );
+      } else {
+        app.log.warn(
+          `🔄 Retry dans ${delayMinutes} minutes (tentative ${attemptsMade + 1}/${RETRY_CONFIG.MAX_ATTEMPTS})`,
+        );
+      }
+
+      // Programmer le retry avec le délai calculé
+      await job.retry("custom", delay);
+    } else {
+      app.log.error(
+        {
+          jobId: job?.id,
+          error: err.message,
+          stack: err.stack,
+          jobData: job?.data,
+          attempts: attemptsMade,
+        },
+        `💥 Job ${job?.id} définitivement échoué après ${RETRY_CONFIG.MAX_ATTEMPTS} tentatives`,
+      );
+    }
   });
 
-  worker.on("failed", (job, err) => {
-    app.log.error(
-      {
-        jobId: job?.id,
-        error: err.message,
-        stack: err.stack,
-        jobData: job?.data,
-      },
-      `❌ Job ${job?.id} échoué`,
-    );
+  worker.on("completed", (job) => {
+    app.log.info(`✅ Job ${job.id} terminé avec succès`);
   });
 
   worker.on("error", (err) => {
@@ -415,6 +525,9 @@ async function startWorker() {
 
   app.log.info(
     "👷 Sellsy Invoice Creator démarré - En attente des devis acceptés...",
+  );
+  app.log.info(
+    `⚙️ Configuration retry: max ${RETRY_CONFIG.MAX_ATTEMPTS} tentatives, délai max ${RETRY_CONFIG.MAX_DELAY / 60000} minutes`,
   );
 }
 
@@ -427,6 +540,12 @@ app.get("/health", async (request, reply) => {
       status: "healthy",
       service: "sellsy-invoice-creator",
       sellsy_api: "connected",
+      retry_config: {
+        max_attempts: RETRY_CONFIG.MAX_ATTEMPTS,
+        initial_delay_ms: RETRY_CONFIG.INITIAL_DELAY,
+        max_delay_minutes: RETRY_CONFIG.MAX_DELAY / 60000,
+        maintenance_retry_minutes: RETRY_CONFIG.MAINTENANCE_RETRY_DELAY / 60000,
+      },
       timestamp: new Date().toISOString(),
     };
   } catch (error) {
